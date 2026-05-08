@@ -1,6 +1,7 @@
 -- =============================================================================
 -- transcript_pkg.vhd
--- Lightweight transcript: mirrors output to a log file and/or the console.
+-- Lightweight transcript with log levels and verbosity filtering.
+-- Mirrors output to a log file and/or the console.
 --
 -- Compile order : 1  (no dependencies)
 -- VHDL standard : 2008
@@ -11,26 +12,33 @@ use std.textio.all;
 
 package transcript_pkg is
 
+  -- Ordered least → most severe; threshold comparison uses positional values.
+  type t_log_level is (DEBUG, INFO, WARNING, ERROR);
+
   type t_transcript is protected
 
     -- Open a log file. Set append=true to accumulate across runs.
-    procedure open_transcript  (filename : in string;
-                                 append   : in boolean := false);
+    procedure open_transcript (filename : in string;
+                                append   : in boolean := false);
 
     -- Flush and close the current log file.
     procedure close_transcript;
 
     -- When true (default), every line is also written to the console.
-    procedure set_mirror       (en : in boolean);
+    procedure set_mirror      (en        : in boolean);
 
+    -- Only messages at or above this level are printed. Default: DEBUG (all).
+    procedure set_verbosity   (level     : in t_log_level);
+
+    impure function verbosity  return t_log_level;
     impure function is_open    return boolean;
 
-    -- Primary output call: writes msg + newline to active destinations.
-    procedure print_line       (msg : in string);
+    -- Primary output call — level is first parameter.
+    procedure print (level : in t_log_level; msg : in string);
 
   end protected t_transcript;
 
-  -- Global singleton — visible to alert_log_pkg and scoreboard_pkg.
+  -- Global singleton.
   shared variable Transcript : t_transcript;
 
 end package transcript_pkg;
@@ -45,10 +53,31 @@ package body transcript_pkg is
   type t_transcript is protected body
 
     file     trans_file  : text;
-    variable v_open      : boolean := false;
-    variable v_mirror    : boolean := true;   -- echo to console by default
+    variable v_open      : boolean     := false;
+    variable v_mirror    : boolean     := true;
+    variable v_verbosity : t_log_level := DEBUG;   -- print everything by default
 
-    -- -----------------------------------------------------------------
+    -- ── Private: level prefix ─────────────────────────────────────────────────
+    function level_prefix (level : t_log_level) return string is
+    begin
+      case level is
+        when DEBUG   => return "[DEBUG  ] ";
+        when INFO    => return "[INFO   ] ";
+        when WARNING => return "[WARNING] ";
+        when ERROR   => return "[ERROR  ] ";
+      end case;
+    end function;
+
+    -- ── Private: write one line to a destination ──────────────────────────────
+    -- writeline deallocates the line, so each destination needs its own write.
+    procedure write_dest (dest : inout text; msg : in string) is
+      variable l : line;
+    begin
+      write(l, string'(msg));
+      writeline(dest, l);
+    end procedure;
+
+    -- ── open_transcript ───────────────────────────────────────────────────────
     procedure open_transcript (filename : in string;
                                 append   : in boolean := false) is
       variable status : file_open_status;
@@ -66,48 +95,61 @@ package body transcript_pkg is
 
       if status = open_ok then
         v_open := true;
-        print_line("=== Transcript opened: " & filename & " ===");
+        print(INFO, "=== Transcript opened: " & filename & " ===");
       else
-        report "[Transcript] Failed to open file: " & filename
-          severity error;
+        report "[Transcript] Failed to open file: " & filename severity error;
       end if;
     end procedure;
 
-    -- -----------------------------------------------------------------
+    -- ── close_transcript ──────────────────────────────────────────────────────
     procedure close_transcript is
     begin
       if v_open then
-        print_line("=== Transcript closed ===");
+        print(INFO, "=== Transcript closed ===");
         file_close(trans_file);
         v_open := false;
       end if;
     end procedure;
 
-    -- -----------------------------------------------------------------
+    -- ── set_mirror ────────────────────────────────────────────────────────────
     procedure set_mirror (en : in boolean) is
     begin
       v_mirror := en;
     end procedure;
 
-    -- -----------------------------------------------------------------
+    -- ── set_verbosity ─────────────────────────────────────────────────────────
+    procedure set_verbosity (level : in t_log_level) is
+    begin
+      v_verbosity := level;
+    end procedure;
+
+    -- ── verbosity ─────────────────────────────────────────────────────────────
+    impure function verbosity return t_log_level is
+    begin
+      return v_verbosity;
+    end function;
+
+    -- ── is_open ───────────────────────────────────────────────────────────────
     impure function is_open return boolean is
     begin
       return v_open;
     end function;
 
-    -- -----------------------------------------------------------------
-    -- writeline deallocates the line after writing, so we must call
-    -- write() separately for each destination.
-    procedure print_line (msg : in string) is
-      variable l : line;
+    -- ── print ─────────────────────────────────────────────────────────────────
+    procedure print (level : in t_log_level; msg : in string) is
+      variable full : string := level_prefix(level) & msg;
     begin
-      if v_mirror then
-        write(l, string'(msg));
-        writeline(OUTPUT, l);       -- console
+      -- Drop anything below the current verbosity threshold
+      if level < v_verbosity then
+        return;
       end if;
+
+      if v_mirror then
+        write_dest(OUTPUT, full);
+      end if;
+
       if v_open then
-        write(l, string'(msg));
-        writeline(trans_file, l);   -- log file
+        write_dest(trans_file, full);
       end if;
     end procedure;
 
